@@ -2,28 +2,48 @@ use super::instance::Instance;
 use super::physical_device::PhysicalDevice;
 use anyhow::{Context, Result};
 use std::ffi::CStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use ash::vk;
 
+pub const FRAMES_IN_FLIGHT: usize = 2;
+
+pub struct DeviceBuilder {
+    instance: Arc<Instance>,
+    physical_device: Arc<PhysicalDevice>,
+}
+
+pub struct Device {
+    pub raw: ash::Device,
+    pub instance: Arc<Instance>,
+    pub physical_device: Arc<PhysicalDevice>,
+
+    pub graphics_queue: Queue,
+    pub compute_queue: Queue,
+    pub transfer_queue: Queue,
+
+    pub graphics_timeline_semaphore: vk::Semaphore,
+    absolute_frame_index: AtomicUsize,
+
+    pub command_pools: [vk::CommandPool; FRAMES_IN_FLIGHT],
+    pub command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
+}
+
 pub struct Queue {
-    raw: vk::Queue,
-    family: u32,
+    pub raw: vk::Queue,
+    pub family: u32,
 }
 
-pub struct DeviceBuilder<'a, 'b> {
-    instance: &'a Instance,
-    physical_device: &'b PhysicalDevice,
-}
-
-impl<'a, 'b> DeviceBuilder<'a, 'b> {
-    pub fn new(instance: &'a Instance, physical_device: &'b PhysicalDevice) -> Self {
+impl DeviceBuilder {
+    pub fn new(instance: Arc<Instance>, physical_device: Arc<PhysicalDevice>) -> Self {
         Self {
             instance,
             physical_device,
         }
     }
 
-    pub fn build(&self) -> Result<Device> {
+    pub fn build(self) -> Result<Device> {
         let queue_family_properties = unsafe {
             self.instance
                 .raw
@@ -92,6 +112,7 @@ impl<'a, 'b> DeviceBuilder<'a, 'b> {
             ash::khr::swapchain::NAME,
             ash::khr::timeline_semaphore::NAME,
             ash::ext::descriptor_indexing::NAME,
+            ash::khr::synchronization2::NAME,
         ];
 
         for ext in &required_extensions {
@@ -102,13 +123,15 @@ impl<'a, 'b> DeviceBuilder<'a, 'b> {
 
         let mut timeline_sem = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
         let mut desc_indexing = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        let mut sync2 = vk::PhysicalDeviceSynchronization2Features::default();
 
         let required_extensions: Vec<*const i8> =
             required_extensions.iter().map(|ext| ext.as_ptr()).collect();
 
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut timeline_sem)
-            .push_next(&mut desc_indexing);
+            .push_next(&mut desc_indexing)
+            .push_next(&mut sync2);
 
         unsafe {
             self.instance
@@ -154,18 +177,108 @@ impl<'a, 'b> DeviceBuilder<'a, 'b> {
             family: transfer_queue_family_index,
         };
 
+        // only 1 pool and buffer per frame for now
+        // TODO: multithreading, compute
+        let mut command_pools = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut command_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        for _ in 0..FRAMES_IN_FLIGHT {
+            let command_pool_create_info = vk::CommandPoolCreateInfo::default()
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                .queue_family_index(graphics_queue.family);
+            let command_pool =
+                unsafe { raw_device.create_command_pool(&command_pool_create_info, None)? };
+
+            let command_buffer_alloc_info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            let command_buffer =
+                unsafe { raw_device.allocate_command_buffers(&command_buffer_alloc_info)? };
+
+            command_pools.push(command_pool);
+            command_buffers.push(command_buffer[0]);
+        }
+        let command_pools: [vk::CommandPool; FRAMES_IN_FLIGHT] = command_pools
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to create command pools"))?;
+        let command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT] = command_buffers
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to create command buffers"))?;
+
+        let mut timeline_semaphore_type_create_info = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let timeline_semaphore_create_info =
+            vk::SemaphoreCreateInfo::default().push_next(&mut timeline_semaphore_type_create_info);
+
+        let graphics_timeline_semaphore =
+            unsafe { raw_device.create_semaphore(&timeline_semaphore_create_info, None) }?;
+
         Ok(Device {
             raw: raw_device,
+            physical_device: self.physical_device,
+            instance: self.instance,
+
             graphics_queue,
             compute_queue,
             transfer_queue,
+
+            graphics_timeline_semaphore,
+            absolute_frame_index: AtomicUsize::new(0),
+
+            command_pools,
+            command_buffers,
         })
     }
 }
 
-pub struct Device {
-    pub raw: ash::Device,
-    pub graphics_queue: Queue,
-    pub compute_queue: Queue,
-    pub transfer_queue: Queue,
+impl Device {
+    pub fn absolute_frame_index(&self) -> usize {
+        self.absolute_frame_index
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn begin_frame(&self, absolute_frame_index: usize) -> Result<()> {
+        // wait for the frame submitted FRAMES_IN_FLIGHT ago
+        if absolute_frame_index >= FRAMES_IN_FLIGHT {
+            let wait_value = (absolute_frame_index - FRAMES_IN_FLIGHT + 1) as u64;
+            let wait_info = vk::SemaphoreWaitInfo::default()
+                .semaphores(std::slice::from_ref(&self.graphics_timeline_semaphore))
+                .values(std::slice::from_ref(&wait_value));
+
+            unsafe { self.raw.wait_semaphores(&wait_info, std::u64::MAX)? };
+        }
+
+        Ok(())
+    }
+
+    pub fn finish_frame(&self) {
+        self.absolute_frame_index
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn get_command_buffer(&self, absolute_frame_index: usize) -> vk::CommandBuffer {
+        self.command_buffers[absolute_frame_index % FRAMES_IN_FLIGHT]
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.raw.device_wait_idle();
+
+            for command_pool in self.command_pools {
+                self.raw.destroy_command_pool(command_pool, None);
+            }
+            self.raw
+                .destroy_semaphore(self.graphics_timeline_semaphore, None);
+            self.raw.destroy_device(None);
+
+            if let Some(debug_messenger) = self.instance.debug_messenger
+                && let Some(ref debug_utils_loader) = self.instance.debug_utils_loader
+            {
+                debug_utils_loader.destroy_debug_utils_messenger(debug_messenger, None);
+            }
+            self.instance.raw.destroy_instance(None);
+        }
+    }
 }
