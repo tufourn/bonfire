@@ -7,6 +7,7 @@ pub mod command_ring_buffer;
 pub mod device;
 pub mod instance;
 pub mod physical_device;
+pub mod shader_compiler;
 pub mod surface;
 pub mod swapchain;
 

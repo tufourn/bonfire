@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bonfire::vulkan::{
     RenderBackend, RenderBackendConfig, command_ring_buffer::CommandRingBuffer,
-    device::FRAMES_IN_FLIGHT,
+    device::FRAMES_IN_FLIGHT, shader_compiler::ShaderCompiler,
 };
 
 use winit::{
@@ -50,6 +50,13 @@ impl ApplicationHandler for App {
             render_backend,
             command_ring_buffer,
         });
+
+        let triangle_vert_path = "triangle/triangle_vert.slang";
+        let _triangle_vert_shader = ShaderCompiler::compile_slang(triangle_vert_path)
+            .expect("Failed to compile vert shader");
+        let triangle_frag_path = "triangle/triangle_frag.slang";
+        let _triangle_frag_shader = ShaderCompiler::compile_slang(triangle_frag_path)
+            .expect("Failed to compile frag shader");
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
