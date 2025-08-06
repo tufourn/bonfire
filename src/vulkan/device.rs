@@ -1,9 +1,9 @@
 use super::instance::Instance;
 use super::physical_device::PhysicalDevice;
 use anyhow::{Context, Result};
+use std::cell::UnsafeCell;
 use std::ffi::CStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 
 use ash::vk;
 
@@ -24,12 +24,16 @@ pub struct Device {
     pub transfer_queue: Queue,
 
     pub graphics_timeline_semaphore: vk::Semaphore,
-    absolute_frame_index: AtomicUsize,
-
-    pub command_pools: [vk::CommandPool; FRAMES_IN_FLIGHT],
-    pub command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT],
+    absolute_frame_index: UnsafeCell<usize>,
 }
 
+// technically not thread safe with interior mutability but
+// the functions that modify those fields should only be
+// called in the main thread
+unsafe impl Send for Device {}
+unsafe impl Sync for Device {}
+
+#[derive(Copy, Clone)]
 pub struct Queue {
     pub raw: vk::Queue,
     pub family: u32,
@@ -177,34 +181,6 @@ impl DeviceBuilder {
             family: transfer_queue_family_index,
         };
 
-        // only 1 pool and buffer per frame for now
-        // TODO: multithreading, compute
-        let mut command_pools = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut command_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        for _ in 0..FRAMES_IN_FLIGHT {
-            let command_pool_create_info = vk::CommandPoolCreateInfo::default()
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                .queue_family_index(graphics_queue.family);
-            let command_pool =
-                unsafe { raw_device.create_command_pool(&command_pool_create_info, None)? };
-
-            let command_buffer_alloc_info = vk::CommandBufferAllocateInfo::default()
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-            let command_buffer =
-                unsafe { raw_device.allocate_command_buffers(&command_buffer_alloc_info)? };
-
-            command_pools.push(command_pool);
-            command_buffers.push(command_buffer[0]);
-        }
-        let command_pools: [vk::CommandPool; FRAMES_IN_FLIGHT] = command_pools
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Failed to create command pools"))?;
-        let command_buffers: [vk::CommandBuffer; FRAMES_IN_FLIGHT] = command_buffers
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Failed to create command buffers"))?;
-
         let mut timeline_semaphore_type_create_info = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
@@ -224,40 +200,39 @@ impl DeviceBuilder {
             transfer_queue,
 
             graphics_timeline_semaphore,
-            absolute_frame_index: AtomicUsize::new(0),
-
-            command_pools,
-            command_buffers,
+            absolute_frame_index: UnsafeCell::new(0),
         })
     }
 }
 
 impl Device {
     pub fn absolute_frame_index(&self) -> usize {
-        self.absolute_frame_index
-            .load(std::sync::atomic::Ordering::Acquire)
+        unsafe { *self.absolute_frame_index.get() }
     }
-    pub fn begin_frame(&self, absolute_frame_index: usize) -> Result<()> {
+
+    pub fn frame_index(&self) -> usize {
+        self.absolute_frame_index() % FRAMES_IN_FLIGHT
+    }
+
+    pub fn begin_frame(&self) -> Result<()> {
         // wait for the frame submitted FRAMES_IN_FLIGHT ago
+        let absolute_frame_index = self.absolute_frame_index();
         if absolute_frame_index >= FRAMES_IN_FLIGHT {
             let wait_value = (absolute_frame_index - FRAMES_IN_FLIGHT + 1) as u64;
             let wait_info = vk::SemaphoreWaitInfo::default()
                 .semaphores(std::slice::from_ref(&self.graphics_timeline_semaphore))
                 .values(std::slice::from_ref(&wait_value));
 
-            unsafe { self.raw.wait_semaphores(&wait_info, std::u64::MAX)? };
+            unsafe { self.raw.wait_semaphores(&wait_info, u64::MAX)? };
         }
 
         Ok(())
     }
 
     pub fn finish_frame(&self) {
-        self.absolute_frame_index
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
-    }
-
-    pub fn get_command_buffer(&self, absolute_frame_index: usize) -> vk::CommandBuffer {
-        self.command_buffers[absolute_frame_index % FRAMES_IN_FLIGHT]
+        unsafe {
+            *self.absolute_frame_index.get() += 1;
+        }
     }
 }
 
@@ -266,9 +241,6 @@ impl Drop for Device {
         unsafe {
             let _ = self.raw.device_wait_idle();
 
-            for command_pool in self.command_pools {
-                self.raw.destroy_command_pool(command_pool, None);
-            }
             self.raw
                 .destroy_semaphore(self.graphics_timeline_semaphore, None);
             self.raw.destroy_device(None);

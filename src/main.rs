@@ -1,6 +1,8 @@
 use anyhow::Result;
-use bonfire::vulkan::device::FRAMES_IN_FLIGHT;
-use bonfire::vulkan::{RenderBackend, RenderBackendConfig};
+use bonfire::vulkan::{
+    RenderBackend, RenderBackendConfig, command_ring_buffer::CommandRingBuffer,
+    device::FRAMES_IN_FLIGHT,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -11,10 +13,15 @@ use winit::{
 
 use ash::vk;
 
+struct Renderer {
+    render_backend: RenderBackend,
+    command_ring_buffer: CommandRingBuffer,
+}
+
 #[derive(Default)]
 struct App {
     window: Option<Window>,
-    render_backend: Option<RenderBackend>,
+    renderer: Option<Renderer>,
 }
 
 impl ApplicationHandler for App {
@@ -28,11 +35,21 @@ impl ApplicationHandler for App {
             validation_layers: true,
             vsync: true,
         };
-        self.render_backend = Some(
-            RenderBackend::new(&window, &render_config).expect("Failed to create render backend"),
-        );
+
+        let render_backend =
+            RenderBackend::new(&window, &render_config).expect("Failed to create render backend");
+
+        let command_ring_buffer = CommandRingBuffer::builder(render_backend.device.clone())
+            .num_pools(FRAMES_IN_FLIGHT)
+            .primary_buffers_per_pool(1)
+            .build()
+            .expect("Failed to build command buffer manager");
 
         self.window = Some(window);
+        self.renderer = Some(Renderer {
+            render_backend,
+            command_ring_buffer,
+        });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -42,23 +59,23 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let render_backend = self.render_backend.as_mut().unwrap();
+                let renderer = self.renderer.as_mut().unwrap();
+                let render_backend = &mut renderer.render_backend;
                 let vk_device = &render_backend.device.raw;
-                let absolute_frame_index = render_backend.device.absolute_frame_index();
 
-                render_backend
-                    .device
-                    .begin_frame(absolute_frame_index)
-                    .expect("begin frame");
+                render_backend.device.begin_frame().expect("begin frame");
 
                 let swapchain_image = render_backend
                     .swapchain
                     .acquire_next_image()
                     .expect("acquire next image");
 
-                let command_buffer = render_backend
-                    .device
-                    .get_command_buffer(absolute_frame_index);
+                renderer
+                    .command_ring_buffer
+                    .reset_pool(0)
+                    .expect("failed to reset command pool");
+
+                let command_buffer = renderer.command_ring_buffer.get_next_primary_buffer(0);
 
                 unsafe {
                     vk_device
@@ -110,11 +127,14 @@ impl ApplicationHandler for App {
                         .semaphore(swapchain_image.sync.acquire_semaphore)
                         .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
                 ];
-                if absolute_frame_index >= FRAMES_IN_FLIGHT {
+                if render_backend.device.absolute_frame_index() >= FRAMES_IN_FLIGHT {
                     wait_semaphores.push(
                         vk::SemaphoreSubmitInfo::default()
                             .semaphore(render_backend.device.graphics_timeline_semaphore)
-                            .value((absolute_frame_index - FRAMES_IN_FLIGHT + 1) as u64)
+                            .value(
+                                (render_backend.device.absolute_frame_index() - FRAMES_IN_FLIGHT
+                                    + 1) as u64,
+                            )
                             .stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE),
                     );
                 }
@@ -125,7 +145,7 @@ impl ApplicationHandler for App {
                         .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
                     vk::SemaphoreSubmitInfo::default()
                         .semaphore(render_backend.device.graphics_timeline_semaphore)
-                        .value((absolute_frame_index + 1) as u64)
+                        .value((render_backend.device.absolute_frame_index() + 1) as u64)
                         .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
                 ];
 
@@ -157,9 +177,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(new_size) => {
                 println!("Resize requested: {}x{}", new_size.width, new_size.height);
-                self.render_backend
+                self.renderer
                     .as_mut()
                     .unwrap()
+                    .render_backend
                     .swapchain
                     .resize()
                     .expect("Failed to resize swapchain");
