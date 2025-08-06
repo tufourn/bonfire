@@ -3,7 +3,7 @@ use bonfire::vulkan::{
     RenderBackend, RenderBackendConfig, command_ring_buffer::CommandRingBuffer,
     device::FRAMES_IN_FLIGHT, shader_compiler::ShaderCompiler,
 };
-
+use log::{info, warn};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -62,7 +62,7 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                println!("The close button was pressed; stopping");
+                info!("The close button was pressed; stopping");
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
@@ -183,7 +183,7 @@ impl ApplicationHandler for App {
                 self.window.as_ref().unwrap().request_redraw();
             }
             WindowEvent::Resized(new_size) => {
-                println!("Resize requested: {}x{}", new_size.width, new_size.height);
+                warn!("Resize requested: {}x{}", new_size.width, new_size.height);
                 self.renderer
                     .as_mut()
                     .unwrap()
@@ -198,6 +198,8 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 

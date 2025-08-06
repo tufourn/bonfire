@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use ash::vk;
 use ash::vk::SwapchainCreateInfoKHR;
+use log::info;
 
 use super::device;
 use super::surface;
@@ -179,7 +180,7 @@ impl Swapchain {
 
         let raw = unsafe { loader.create_swapchain(&create_info, None)? };
 
-        println!("Created swapchain: {}x{}", extent.width, extent.height);
+        info!("Created swapchain: {}x{}", extent.width, extent.height);
 
         Ok(raw)
     }

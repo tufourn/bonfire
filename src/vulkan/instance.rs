@@ -1,4 +1,5 @@
-use std::{borrow::Cow, ffi::CStr};
+use log::{debug, error, info, trace, warn};
+use std::ffi::CStr;
 
 use anyhow::{Context, Result};
 use ash::vk;
@@ -35,17 +36,6 @@ pub struct Instance {
 impl Instance {
     fn new(builder: &InstanceBuilder) -> Result<Self> {
         let entry = unsafe { ash::Entry::load().context("Failed to load Entry")? };
-
-        let instance_layer_properties = unsafe {
-            entry
-                .enumerate_instance_layer_properties()
-                .context("Failed to enumerate Vulkan instance layers")
-        }?;
-        println!("Available layers:");
-        for layer in &instance_layer_properties {
-            let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
-            println!("  {}", name.to_string_lossy());
-        }
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"Bonfire")
@@ -133,29 +123,21 @@ impl Instance {
 
 extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
-    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
+    _message_type: vk::DebugUtilsMessageTypeFlagsEXT,
     p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     _user_data: *mut std::os::raw::c_void,
 ) -> vk::Bool32 {
     unsafe {
         let callback_data = *p_callback_data;
-        let message_id_number = callback_data.message_id_number;
+        let log_message = CStr::from_ptr(callback_data.p_message).to_str().unwrap();
 
-        let message_id_name = if callback_data.p_message_id_name.is_null() {
-            Cow::from("")
-        } else {
-            CStr::from_ptr(callback_data.p_message_id_name).to_string_lossy()
-        };
-
-        let message = if callback_data.p_message.is_null() {
-            Cow::from("")
-        } else {
-            CStr::from_ptr(callback_data.p_message).to_string_lossy()
-        };
-
-        println!(
-            "{message_severity:?}:{message_type:?} [{message_id_name} ({message_id_number})] : {message}",
-        );
+        match message_severity {
+            vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => trace!("{log_message}"),
+            vk::DebugUtilsMessageSeverityFlagsEXT::INFO => info!("{log_message}"),
+            vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => warn!("{log_message}"),
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => error!("{log_message}"),
+            _ => debug!("{log_message}"),
+        }
 
         vk::FALSE
     }

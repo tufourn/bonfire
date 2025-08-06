@@ -1,14 +1,15 @@
 use anyhow::{Context, Result};
+use log::info;
 use std::{cell::OnceCell, ffi::CStr, path::Path};
 
 use shader_slang::{self as slang, Downcast};
 
 use bytes::Bytes;
 
-static SEARCH_PATH: &'static CStr = c"assets/shaders/slang";
+static SEARCH_PATH: &CStr = c"assets/shaders/slang";
 
 thread_local! {
-    static SLANG_GLOBAL_SESSION: OnceCell<slang::GlobalSession> = OnceCell::new();
+    static SLANG_GLOBAL_SESSION: OnceCell<slang::GlobalSession> = const { OnceCell::new() };
 }
 
 pub fn with_slang_global_session<F, R>(f: F) -> R
@@ -76,7 +77,7 @@ impl ShaderCompiler {
 
             let spirv = Bytes::copy_from_slice(shader_bytecode.as_slice());
 
-            println!("Compiled {} ({} bytes)", shader_name, spirv.len());
+            info!("Compiled {} ({} bytes)", shader_name, spirv.len());
 
             Ok(CompiledShader {
                 name: shader_name,
