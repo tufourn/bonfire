@@ -128,6 +128,7 @@ impl DeviceBuilder {
         let mut timeline_sem = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
         let mut desc_indexing = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut sync2 = vk::PhysicalDeviceSynchronization2Features::default();
+        let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
 
         let required_extensions: Vec<*const i8> =
             required_extensions.iter().map(|ext| ext.as_ptr()).collect();
@@ -135,7 +136,8 @@ impl DeviceBuilder {
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut timeline_sem)
             .push_next(&mut desc_indexing)
-            .push_next(&mut sync2);
+            .push_next(&mut sync2)
+            .push_next(&mut dynamic_rendering);
 
         unsafe {
             self.instance
@@ -167,6 +169,7 @@ impl DeviceBuilder {
         assert!(desc_indexing.descriptor_binding_partially_bound == vk::TRUE);
         assert!(desc_indexing.descriptor_binding_variable_descriptor_count == vk::TRUE);
         assert!(desc_indexing.runtime_descriptor_array == vk::TRUE);
+        assert!(dynamic_rendering.dynamic_rendering == vk::TRUE);
 
         let graphics_queue = Queue {
             raw: unsafe { raw_device.get_device_queue(graphics_queue_family_index, 0) },

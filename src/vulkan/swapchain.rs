@@ -23,6 +23,7 @@ pub struct SwapchainSync {
 
 pub struct SwapchainImage {
     pub image: vk::Image,
+    pub image_view: vk::ImageView,
     pub image_index: u32,
     pub sync: SwapchainSync,
 }
@@ -32,8 +33,10 @@ pub struct Swapchain {
     pub desc: SwapchainDesc,
 
     pub raw: vk::SwapchainKHR,
+    extent: vk::Extent2D,
 
     images: Vec<vk::Image>,
+    image_views: Vec<vk::ImageView>,
 
     syncs: Vec<SwapchainSync>,
     sync_index: usize,
@@ -61,56 +64,6 @@ impl Swapchain {
     ) -> Result<Self> {
         let loader = ash::khr::swapchain::Device::new(&device.instance.raw, &device.raw);
 
-        let raw = Self::create_raw_swapchain(&loader, device, surface, &desc)?;
-        let images = unsafe { loader.get_swapchain_images(raw)? };
-
-        let mut syncs = Vec::with_capacity(images.len());
-        let semaphore_create_info = vk::SemaphoreCreateInfo::default();
-        for _ in &images {
-            let acquire_semaphore =
-                unsafe { device.raw.create_semaphore(&semaphore_create_info, None)? };
-            let present_semaphore =
-                unsafe { device.raw.create_semaphore(&semaphore_create_info, None)? };
-            syncs.push(SwapchainSync {
-                acquire_semaphore,
-                present_semaphore,
-            });
-        }
-
-        Ok(Self {
-            raw,
-            loader,
-            desc,
-            device: device.clone(),
-            surface: surface.clone(),
-            syncs,
-            sync_index: 0,
-            images,
-        })
-    }
-
-    pub fn resize(&mut self) -> Result<()> {
-        unsafe { self.device.raw.device_wait_idle()? };
-
-        self.desc.old_swapchain = Some(self.raw);
-        let new_swapchain =
-            Self::create_raw_swapchain(&self.loader, &self.device, &self.surface, &self.desc)?;
-        let new_images = unsafe { self.loader.get_swapchain_images(new_swapchain)? };
-
-        unsafe { self.loader.destroy_swapchain(self.raw, None) };
-
-        self.raw = new_swapchain;
-        self.images = new_images;
-
-        Ok(())
-    }
-
-    fn create_raw_swapchain(
-        loader: &ash::khr::swapchain::Device,
-        device: &Arc<device::Device>,
-        surface: &Arc<surface::Surface>,
-        desc: &SwapchainDesc,
-    ) -> Result<vk::SwapchainKHR> {
         let surface_capabilities = unsafe {
             surface
                 .loader
@@ -182,7 +135,79 @@ impl Swapchain {
 
         info!("Created swapchain: {}x{}", extent.width, extent.height);
 
-        Ok(raw)
+        let images = unsafe { loader.get_swapchain_images(raw)? };
+        let image_views = images
+            .iter()
+            .map(|image| unsafe {
+                let image_view_create_info = vk::ImageViewCreateInfo::default()
+                    .image(*image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(desc.format.format)
+                    .components(
+                        vk::ComponentMapping::default()
+                            .r(vk::ComponentSwizzle::IDENTITY)
+                            .g(vk::ComponentSwizzle::IDENTITY)
+                            .b(vk::ComponentSwizzle::IDENTITY)
+                            .a(vk::ComponentSwizzle::IDENTITY),
+                    )
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(1)
+                            .layer_count(1),
+                    );
+                device
+                    .raw
+                    .create_image_view(&image_view_create_info, None)
+                    .unwrap()
+            })
+            .collect();
+
+        let mut syncs = Vec::with_capacity(images.len());
+        let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+        for _ in &images {
+            let acquire_semaphore =
+                unsafe { device.raw.create_semaphore(&semaphore_create_info, None)? };
+            let present_semaphore =
+                unsafe { device.raw.create_semaphore(&semaphore_create_info, None)? };
+            syncs.push(SwapchainSync {
+                acquire_semaphore,
+                present_semaphore,
+            });
+        }
+
+        Ok(Self {
+            raw,
+            loader,
+            desc,
+            extent,
+            device: device.clone(),
+            surface: surface.clone(),
+            syncs,
+            sync_index: 0,
+            images,
+            image_views,
+        })
+    }
+
+    pub fn rebuild(&mut self) -> Result<()> {
+        unsafe {
+            self.device.raw.device_wait_idle()?;
+        }
+
+        let desc = SwapchainDesc {
+            old_swapchain: Some(self.raw),
+            ..self.desc
+        };
+
+        let mut new_swapchain = Self::new(&self.device, &self.surface, desc)?;
+        std::mem::swap(self, &mut new_swapchain);
+
+        Ok(())
+    }
+
+    pub fn get_extent(&self) -> vk::Extent2D {
+        self.extent
     }
 
     pub fn acquire_next_image(&mut self) -> Result<SwapchainImage> {
@@ -202,6 +227,7 @@ impl Swapchain {
 
         Ok(SwapchainImage {
             image: self.images[image_index as usize],
+            image_view: self.image_views[image_index as usize],
             image_index,
             sync,
         })
@@ -239,6 +265,9 @@ impl Drop for Swapchain {
                 self.device
                     .raw
                     .destroy_semaphore(sync.present_semaphore, None);
+            }
+            for image_view in &self.image_views {
+                self.device.raw.destroy_image_view(*image_view, None);
             }
             self.loader.destroy_swapchain(self.raw, None);
         }

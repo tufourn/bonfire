@@ -3,17 +3,10 @@ cbuffer Uniforms
     float4x4 modelViewProjection;
 }
 
-struct AssembledVertex
-{
-    float3	position : POSITION;
-    float3	color    : COLOR;
-};
-
 struct CoarseVertex
 {
     float3 color;
 };
-;
 
 struct VertexStageOutput
 {
@@ -21,17 +14,28 @@ struct VertexStageOutput
     float4          sv_position     : SV_Position;
 };
 
+static const float3 vertexPositions[3] = {
+    float3( 0.0,  0.5, 0.0),
+    float3(-0.5, -0.5, 0.0),
+    float3( 0.5, -0.5, 0.0)
+};
+
+static const float3 vertexColors[3] = {
+    float3(1.0, 0.0, 0.0),
+    float3(0.0, 1.0, 0.0),
+    float3(0.0, 0.0, 1.0)
+};
+
 [shader("vertex")]
-VertexStageOutput main(
-    AssembledVertex assembledVertex)
+VertexStageOutput main(uint vertexID : SV_VertexID)
 {
     VertexStageOutput output;
 
-    float3 position = assembledVertex.position;
-    float3 color    = assembledVertex.color;
+    float3 position = vertexPositions[vertexID];
+    float3 color    = vertexColors[vertexID];
 
     output.coarseVertex.color = color;
-    output.sv_position = mul(modelViewProjection, float4(position, 1.0));
+    output.sv_position = float4(position, 1.0);
 
     return output;
 }
